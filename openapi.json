@@ -20,6 +20,10 @@
       "description": ""
     },
     {
+      "name": "Dividends",
+      "description": "Per-symbol dividends. Hand-entered rows survive refresh:dividend-data."
+    },
+    {
       "name": "Holdings",
       "description": ""
     },
@@ -480,6 +484,151 @@
         }
       }
     },
+    "/dividend": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/page"
+          },
+          {
+            "$ref": "#/components/parameters/itemsPerPage"
+          },
+          {
+            "$ref": "#/components/parameters/dividendSort"
+          },
+          {
+            "$ref": "#/components/parameters/dividendSearch"
+          },
+          {
+            "$ref": "#/components/parameters/dividendFilter"
+          }
+        ],
+        "tags": ["Dividends"],
+        "summary": "List dividends for symbols you hold",
+        "description": "Dividends are shared by every holding of a symbol. The list only includes symbols in portfolios you belong to. A single dividend is not wrapped in `data`; this paginated list is.",
+        "responses": {
+          "200": {
+            "description": "Paginated dividends",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/Paginated" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Dividend" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthenticatedError" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      },
+      "post": {
+        "tags": ["Dividends"],
+        "summary": "Create a hand-entered dividend",
+        "description": "Stores source=manual. Recalculates dividends_earned for every holding of the symbol. One row per symbol per calendar date.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DividendWrite" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created dividend, unwrapped",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Dividend" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthenticatedError" },
+          "403": { "$ref": "#/components/responses/UnauthorizedError" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/dividend/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Dividend id",
+          "schema": { "type": "string", "format": "uuid" }
+        }
+      ],
+      "get": {
+        "tags": ["Dividends"],
+        "summary": "Show a dividend",
+        "responses": {
+          "200": {
+            "description": "The dividend, unwrapped",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Dividend" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthenticatedError" },
+          "404": { "$ref": "#/components/responses/NotFoundError" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      },
+      "put": {
+        "tags": ["Dividends"],
+        "summary": "Update a dividend",
+        "description": "Partial body. The row becomes source=manual. Changing symbol or date suppresses the previous symbol/date so sync will not recreate it.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DividendWrite" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated dividend, unwrapped",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Dividend" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthenticatedError" },
+          "403": { "$ref": "#/components/responses/UnauthorizedError" },
+          "404": { "$ref": "#/components/responses/NotFoundError" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      },
+      "delete": {
+        "tags": ["Dividends"],
+        "summary": "Delete a dividend",
+        "description": "Suppresses that symbol and date so a later refresh does not insert it again, then recalculates dividends_earned.",
+        "responses": {
+          "204": { "description": "Deleted" },
+          "401": { "$ref": "#/components/responses/UnauthenticatedError" },
+          "403": { "$ref": "#/components/responses/UnauthorizedError" },
+          "404": { "$ref": "#/components/responses/NotFoundError" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
     "/holding": {
       "get": {
         "tags": [
@@ -701,6 +850,79 @@
   },
   "components": {
     "schemas": {
+      "Dividend": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "readOnly": true
+          },
+          "symbol": {
+            "type": "string",
+            "example": "PETR4.SA",
+            "readOnly": true
+          },
+          "date": {
+            "type": "string",
+            "format": "date",
+            "example": "2024-08-15",
+            "description": "Inclusive entitlement date (B3 data-com). Shares bought or sold on this date count.",
+            "readOnly": true
+          },
+          "dividend_amount": {
+            "type": "number",
+            "example": 1.23456789,
+            "description": "Per-share amount in the symbol trading currency. No tax is withheld by the app.",
+            "readOnly": true
+          },
+          "dividend_amount_base": {
+            "type": "number",
+            "readOnly": true,
+            "description": "Per-share amount converted into the portfolio base currency. Computed; ignored on write."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["sync", "manual"],
+            "readOnly": true,
+            "description": "sync = provider row. manual = created or edited by hand. Refresh never overwrites either."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          }
+        }
+      },
+      "DividendWrite": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "maxLength": 25,
+            "example": "PETR4.SA",
+            "description": "Required on create. Stored uppercase. Must be a symbol you can fully access. On update, omit to keep the current symbol."
+          },
+          "date": {
+            "type": "string",
+            "format": "date",
+            "example": "2024-08-15",
+            "description": "Required on create, format Y-m-d. One dividend per symbol per calendar date. Same-day proventos must be summed into dividend_amount."
+          },
+          "dividend_amount": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 999999999999,
+            "example": 0.85,
+            "description": "Required on create. Per share, up to 8 decimal places. Use the gross B3 figure when you want dividends_earned to match B3 proventos."
+          }
+        }
+      },
       "User": {
         "type": "object",
         "properties": {
@@ -1353,6 +1575,69 @@
           }
         },
         "description": "Filter the results using `filter[name]=value`. Separate multiple values with commas to match any of them (e.g. `filter[symbol]=AAPL,MSFT`). Unsupported filter names return a 422 validation error."
+      },
+      "dividendSort": {
+        "in": "query",
+        "name": "sort",
+        "style": "form",
+        "explode": false,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "symbol",
+              "-symbol",
+              "date",
+              "-date",
+              "dividend_amount",
+              "-dividend_amount",
+              "source",
+              "-source",
+              "created_at",
+              "-created_at",
+              "updated_at",
+              "-updated_at"
+            ]
+          }
+        },
+        "description": "Comma-separated columns to sort by. Prefix a column with `-` to sort it in descending order. Unsupported columns return a 422 validation error."
+      },
+      "dividendSearch": {
+        "in": "query",
+        "name": "search",
+        "schema": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "description": "Case-insensitive partial match against `symbol`"
+      },
+      "dividendFilter": {
+        "in": "query",
+        "name": "filter",
+        "style": "deepObject",
+        "explode": true,
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "symbol": {
+              "type": "string",
+              "description": "One symbol or a comma-separated list. Matched case-insensitively.",
+              "example": "PETR4.SA,VALE3.SA"
+            },
+            "source": {
+              "type": "string",
+              "enum": ["sync", "manual"]
+            },
+            "date": {
+              "type": "string",
+              "format": "date",
+              "example": "2024-08-15"
+            }
+          }
+        },
+        "description": "Filter with `filter[name]=value`. `filter[symbol]` accepts a comma-separated list. Unsupported filter names return a 422 validation error."
       },
       "portfolioSearch": {
         "in": "query",

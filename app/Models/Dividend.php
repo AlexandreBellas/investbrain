@@ -8,6 +8,7 @@ use App\Actions\CopyToBaseCurrency;
 use App\Casts\BaseCurrency;
 use App\Interfaces\MarketData\MarketDataInterface;
 use App\Traits\HasMarketData;
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -24,16 +25,25 @@ class Dividend extends Model
     use HasMarketData;
     use HasUuids;
 
+    public const SOURCE_SYNC = 'sync';
+
+    public const SOURCE_MANUAL = 'manual';
+
     protected $fillable = [
         'symbol',
         'date',
         'dividend_amount',
+        'source',
+    ];
+
+    protected $attributes = [
+        'source' => self::SOURCE_SYNC,
     ];
 
     protected $hidden = [];
 
     protected $casts = [
-        'date' => 'date',
+        'date' => 'date:Y-m-d',
         'last_dividend_update' => 'date',
         'dividend_amount' => 'float',
         'dividend_amount_base' => BaseCurrency::class,
@@ -53,6 +63,16 @@ class Dividend extends Model
         });
     }
 
+    /**
+     * Symbols are stored uppercase so they match holdings created from transactions.
+     */
+    protected function symbol(): Attribute
+    {
+        return Attribute::make(
+            set: fn (string $value) => strtoupper($value)
+        );
+    }
+
     public function holdings(): HasMany
     {
         return $this->hasMany(Holding::class, 'symbol', 'symbol');
@@ -69,21 +89,26 @@ class Dividend extends Model
     }
 
     /**
-     * Grab new dividend data
+     * Grab new dividend data.
+     *
+     * Provider rows are inserted only. Existing rows are not updated or deleted.
+     * Hand-entered dividends (source = manual) and dates the user removed or
+     * moved away from are skipped, including when this runs with --force.
      */
     public static function refreshDividendData(string $symbol): void
     {
-        $dividends_meta = self::where(['symbol' => $symbol])
+        $dividends_meta = self::query()
+            ->where('symbol', $symbol)
+            ->where('source', self::SOURCE_SYNC)
             ->selectRaw('COUNT(symbol) as total_dividends')
             ->selectRaw('MAX(created_at) as last_dividend_update')
-            ->get()
             ->first();
 
         // assume we need to populate ALL dividend data
         $start_date = new Carbon('@0');
         $end_date = now();
 
-        // nope, refresh forward looking only
+        // nope, refresh forward looking only — manual rows must not move this cursor
         if ($dividends_meta->total_dividends) {
 
             $start_date = $dividends_meta->last_dividend_update;
@@ -95,17 +120,26 @@ class Dividend extends Model
             return;
         }
 
-        // get some data
-        if ($dividend_data = collect() && $start_date && $end_date) {
-            $dividend_data = app(MarketDataInterface::class)->dividends($symbol, $start_date, $end_date);
+        $dividend_data = app(MarketDataInterface::class)->dividends($symbol, $start_date, $end_date);
+
+        if ($dividend_data->isEmpty()) {
+
+            return;
         }
 
-        // ah, we found some dividends...
-        if ($dividend_data->isNotEmpty()) {
+        $skipDates = self::providerSkipDates($symbol);
+
+        $freshDividends = $dividend_data
+            ->reject(function ($dividend) use ($skipDates) {
+                return isset($skipDates[Carbon::parse($dividend['date'])->toDateString()]);
+            })
+            ->values();
+
+        if ($freshDividends->isNotEmpty()) {
 
             $market_data = MarketData::getMarketData($symbol);
 
-            $dividend_data
+            $freshDividends
                 ->chunk(10)
                 ->each(function ($chunk) use ($market_data) {
 
@@ -118,23 +152,153 @@ class Dividend extends Model
 
                         $dividend['dividend_amount_base'] = $dividend['dividend_amount'] * $rate_to_base_date;
 
-                        $chunk[$index] = [...$dividend, ...['id' => Str::uuid()->toString(), 'updated_at' => now(), 'created_at' => now()]];
+                        $chunk[$index] = [...$dividend, ...[
+                            'id' => Str::uuid()->toString(),
+                            'source' => self::SOURCE_SYNC,
+                            'updated_at' => now(),
+                            'created_at' => now(),
+                        ]];
                     }
 
-                    // insert records
+                    // insert records; conflicts on (date, symbol) are ignored
                     (new self)->insertOrIgnore($chunk->toArray());
                 });
 
-            // sync to holdings
-            self::syncHoldings($symbol);
-
-            // re-invest dividends
-            self::reinvestDividends($dividend_data, $market_data);
-
-            // sync last dividend amount to market data table
-            $market_data->last_dividend_amount = $dividend_data->sortByDesc('date')->first()['dividend_amount'];
-            $market_data->save();
+            // re-invest only the rows this run actually added
+            self::reinvestDividends($freshDividends, $market_data);
         }
+
+        self::syncDerivedData($symbol);
+    }
+
+    /**
+     * Calendar dates the provider must not insert for this symbol.
+     *
+     * Every stored dividend is left as-is, so a hand-edited amount cannot be
+     * overwritten. Exclusions keep a deleted or moved date from coming back.
+     *
+     * @return array<string, true>
+     */
+    public static function providerSkipDates(string $symbol): array
+    {
+        $dates = self::query()
+            ->where('symbol', $symbol)
+            ->pluck('date')
+            ->merge(
+                DividendSyncExclusion::query()->where('symbol', $symbol)->pluck('date')
+            );
+
+        $skip = [];
+
+        foreach ($dates as $date) {
+            $skip[Carbon::parse($date)->toDateString()] = true;
+        }
+
+        return $skip;
+    }
+
+    /**
+     * Recalculate stored dividend totals and the caches derived from them.
+     */
+    public static function syncDerivedData(string $symbol): void
+    {
+        self::syncHoldings($symbol);
+        self::syncMarketDividendSnapshot($symbol);
+        self::forgetPortfolioMetricsCache($symbol);
+    }
+
+    /**
+     * Point market data at the latest stored dividend, including hand-entered rows.
+     */
+    public static function syncMarketDividendSnapshot(string $symbol): void
+    {
+        $marketData = MarketData::query()->where('symbol', $symbol)->first();
+
+        if ($marketData === null) {
+            return;
+        }
+
+        $latest = self::query()->where('symbol', $symbol)->orderByDesc('date')->first();
+
+        $marketData->last_dividend_amount = $latest?->dividend_amount;
+        $marketData->last_dividend_date = $latest?->date;
+        $marketData->save();
+    }
+
+    /**
+     * Drop cached portfolio metrics that include this symbol's dividends.
+     */
+    public static function forgetPortfolioMetricsCache(string $symbol): void
+    {
+        Holding::query()
+            ->where('symbol', $symbol)
+            ->pluck('portfolio_id')
+            ->unique()
+            ->each(function ($portfolioId) {
+                cache()->forget('portfolio-metrics-'.$portfolioId);
+
+                DB::table('portfolio_user')
+                    ->where('portfolio_id', $portfolioId)
+                    ->pluck('user_id')
+                    ->each(function ($userId) use ($portfolioId) {
+                        cache()->tags(['metrics-'.$userId])->forget('portfolio-metrics-'.$portfolioId);
+                    });
+            });
+    }
+
+    /**
+     * Remove synthetic reinvestment buys that were created for a dividend date.
+     */
+    public static function deleteReinvestedTransactions(string $symbol, string $date): void
+    {
+        Transaction::query()
+            ->where('symbol', $symbol)
+            ->where('reinvested_dividend', true)
+            ->whereDate('date', $date)
+            ->get()
+            ->each(fn (Transaction $transaction) => $transaction->delete());
+    }
+
+    /**
+     * Keep an existing reinvestment buy in line with a corrected per-share amount.
+     * Does not create a reinvestment buy when one does not already exist.
+     */
+    public static function refreshReinvestedTransactions(self $dividend): void
+    {
+        $marketData = MarketData::query()->where('symbol', $dividend->symbol)->first();
+
+        if ($marketData === null || $marketData->market_value <= 0) {
+            return;
+        }
+
+        Holding::query()
+            ->where('symbol', $dividend->symbol)
+            ->where('reinvest_dividends', true)
+            ->get()
+            ->each(function (Holding $holding) use ($dividend, $marketData) {
+                $transaction = Transaction::query()
+                    ->where('portfolio_id', $holding->portfolio_id)
+                    ->where('symbol', $holding->symbol)
+                    ->where('reinvested_dividend', true)
+                    ->whereDate('date', $dividend->date->toDateString())
+                    ->first();
+
+                if ($transaction === null) {
+                    return;
+                }
+
+                $holding->unsetRelation('transactions');
+                $owned = $holding->qtyOwned($dividend->date) - $transaction->quantity;
+
+                if ($owned <= 0) {
+                    $transaction->delete();
+
+                    return;
+                }
+
+                $transaction->quantity = ($dividend->dividend_amount * $owned) / $marketData->market_value;
+                $transaction->save();
+            });
     }
 
     public static function syncHoldings(string $symbol): void

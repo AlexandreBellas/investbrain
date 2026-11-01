@@ -18,8 +18,10 @@ use Carbon\CarbonPeriod;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Investbrain\Frankfurter\Frankfurter;
+use Investbrain\Frankfurter\FrankfurterClient;
 use Mockery;
 
 class MultiCurrencyTest extends TestCase
@@ -38,7 +40,7 @@ class MultiCurrencyTest extends TestCase
 
     public function test_perists_rates_that_after_historic_lookup()
     {
-        $mockClient = Mockery::mock(\Investbrain\Frankfurter\FrankfurterClient::class);
+        $mockClient = Mockery::mock(FrankfurterClient::class);
 
         Frankfurter::shouldReceive('setSymbols')
             ->andReturn($mockClient);
@@ -174,7 +176,7 @@ class MultiCurrencyTest extends TestCase
     public function test_can_get_historic_exchange_rates()
     {
 
-        $mockClient = Mockery::mock(\Investbrain\Frankfurter\FrankfurterClient::class);
+        $mockClient = Mockery::mock(FrankfurterClient::class);
 
         Frankfurter::shouldReceive('setSymbols')
             ->andReturn($mockClient);
@@ -320,7 +322,7 @@ class MultiCurrencyTest extends TestCase
 
     public function test_can_handle_aliases_for_historic_rates()
     {
-        $mockClient = Mockery::mock(\Investbrain\Frankfurter\FrankfurterClient::class);
+        $mockClient = Mockery::mock(FrankfurterClient::class);
 
         Frankfurter::shouldReceive('setSymbols')
             ->andReturn($mockClient);
@@ -595,6 +597,26 @@ class MultiCurrencyTest extends TestCase
             'rate' => .88,
             'date' => now()->addDay()->toDateString(),
         ]]);
+
+        // Daily changes are stored on weekdays only, and today's row is omitted before 23:00.
+        $lastRecorded = now()->isBefore(Carbon::parse(config('investbrain.daily_change_time_of_day')))
+            ? now()->subDay()
+            : now()->copy();
+
+        while ($lastRecorded->isWeekend()) {
+            $lastRecorded->subDay();
+        }
+
+        $lastRecorded = $lastRecorded->toDateString();
+
+        if (! $rates->contains(fn (array $rate) => $rate['date'] === $lastRecorded)) {
+            $rates->push([
+                'currency' => 'GBP',
+                'rate' => .88,
+                'date' => $lastRecorded,
+            ]);
+        }
+
         $rates->each(fn ($rate) => CurrencyRate::create($rate));
 
         // switch user display currency

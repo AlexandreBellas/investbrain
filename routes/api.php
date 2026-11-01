@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Http\ApiControllers\DividendController;
 use App\Http\ApiControllers\HoldingController;
 use App\Http\ApiControllers\MarketDataController;
 use App\Http\ApiControllers\PortfolioController;
@@ -19,6 +20,9 @@ Route::middleware(['auth:api'])->name('api.')->group(function () {
 
     // transaction
     Route::apiResource('/transaction', TransactionController::class);
+
+    // dividend (per symbol; hand-entered rows survive refresh:dividend-data)
+    Route::apiResource('/dividend', DividendController::class);
 
     // holding
     Route::get('/holding', [HoldingController::class, 'index'])->name('holding.index');

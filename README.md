@@ -220,7 +220,7 @@ If you need more details on what the command does, you can take a look at the op
 | Command      | Description      |
 | ------------- | ------------- |
 | refresh:market-data | Refreshes market data with your configured market data provider. |
-| refresh:dividend-data | Refreshes dividend data with your configured market data provider. Will also re-calculate your total dividends earned for each holding. |
+| refresh:dividend-data | Refreshes dividend data with your configured market data provider and re-calculates dividends earned. Dividends created or edited by hand are kept; see [docs/dividends-api.md](docs/dividends-api.md). |
 | refresh:split-data | Refreshes splits data with your configured market data provider. Will also create new transactions to account for any splits. |
 | refresh:currency-data | Grabs the latest daily currency exchange rate data and persists to the database. |
 | capture:daily-change | Captures a snapshot of each portfolio's daily performance. |

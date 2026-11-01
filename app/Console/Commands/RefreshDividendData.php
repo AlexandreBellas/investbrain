@@ -24,7 +24,7 @@ class RefreshDividendData extends Command
      *
      * @var string
      */
-    protected $description = 'Refresh dividend data from data provider';
+    protected $description = 'Refresh dividend data from data provider. Hand-entered dividends are kept.';
 
     /**
      * Create a new command instance.

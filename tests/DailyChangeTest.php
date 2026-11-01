@@ -213,7 +213,13 @@ class DailyChangeTest extends TestCase
 
         $first_date = DailyChange::min('date');
 
-        $this->assertEquals($transactions->min('date')->next(Carbon::MONDAY)->startOfDay()->toDateString(), $first_date);
+        $expected_first = $transactions->min('date')->copy()->startOfDay();
+
+        if ($expected_first->isWeekend()) {
+            $expected_first = $expected_first->next(Carbon::MONDAY);
+        }
+
+        $this->assertEquals($expected_first->toDateString(), Carbon::parse($first_date)->toDateString());
 
         // 2. test daily change will fill when new transaction pre-dates earliest daily change
         config()->set('app.env', 'local');
@@ -230,7 +236,13 @@ class DailyChangeTest extends TestCase
 
         $second_date = DailyChange::min('date');
 
-        $this->assertEquals($second_transaction->date->next(Carbon::MONDAY)->toDateString(), $second_date);
+        $expected_second = $second_transaction->date->copy();
+
+        if ($expected_second->isWeekend()) {
+            $expected_second = $expected_second->next(Carbon::MONDAY);
+        }
+
+        $this->assertEquals($expected_second->toDateString(), Carbon::parse($second_date)->toDateString());
 
         // 3. test daily change will fill when new transaction is between earliest daily change and earliest transaction
         $third_transaction = Transaction::create([
